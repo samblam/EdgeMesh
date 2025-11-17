@@ -10,7 +10,17 @@ from app.db.base import Base
 from app.main import app
 from app.db.session import get_db
 
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+# Import all models to register them with Base.metadata
+from app.models.device import Device  # noqa: F401
+
+import tempfile
+import os
+
+# Use a temporary file-based database instead of :memory:
+# This ensures all connections see the same database
+temp_db = tempfile.NamedTemporaryFile(mode='w', suffix='.db', delete=False)
+temp_db.close()
+TEST_DATABASE_URL = f"sqlite+aiosqlite:///{temp_db.name}"
 
 
 @pytest.fixture(scope="session")
@@ -39,6 +49,12 @@ async def db_engine():
         await conn.run_sync(Base.metadata.drop_all)
 
     await engine.dispose()
+
+    # Clean up temp database file
+    try:
+        os.unlink(temp_db.name)
+    except:
+        pass
 
 
 @pytest.fixture
