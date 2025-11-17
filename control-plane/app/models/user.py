@@ -24,6 +24,8 @@ class User(Base):
 
     # User information
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    role: Mapped[str] = mapped_column(String(50), nullable=False)
 
     # Status and timestamps
     status: Mapped[str] = mapped_column(
@@ -34,4 +36,4 @@ class User(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<User(user_id={self.user_id}, device={self.device_id}, status={self.status})>"
+        return f"<User(user_id={self.user_id}, email={self.email}, role={self.role}, status={self.status})>"

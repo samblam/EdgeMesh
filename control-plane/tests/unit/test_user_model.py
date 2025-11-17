@@ -12,6 +12,8 @@ async def test_create_user(db_session):
         user_id="alice@example.com",
         device_id="device-123",
         full_name="Alice Smith",
+        email="alice@example.com",
+        role="developer",
         status="active"
     )
 
@@ -22,6 +24,8 @@ async def test_create_user(db_session):
     assert user.user_id == "alice@example.com"
     assert user.device_id == "device-123"
     assert user.full_name == "Alice Smith"
+    assert user.email == "alice@example.com"
+    assert user.role == "developer"
     assert user.status == "active"
     assert user.created_at is not None
 
@@ -34,7 +38,9 @@ async def test_user_default_status(db_session):
     user = User(
         user_id="bob@example.com",
         device_id="device-456",
-        full_name="Bob Jones"
+        full_name="Bob Jones",
+        email="bob@example.com",
+        role="analyst"
     )
 
     db_session.add(user)
@@ -55,7 +61,9 @@ async def test_user_created_at_auto_populated(db_session):
     user = User(
         user_id="charlie@example.com",
         device_id="device-789",
-        full_name="Charlie Brown"
+        full_name="Charlie Brown",
+        email="charlie@example.com",
+        role="admin"
     )
 
     db_session.add(user)
@@ -78,7 +86,9 @@ async def test_user_id_is_unique(db_session):
     user1 = User(
         user_id="same@example.com",
         device_id="device-1",
-        full_name="First User"
+        full_name="First User",
+        email="first@example.com",
+        role="developer"
     )
     db_session.add(user1)
     await db_session.commit()
@@ -87,7 +97,9 @@ async def test_user_id_is_unique(db_session):
     user2 = User(
         user_id="same@example.com",  # Duplicate!
         device_id="device-2",
-        full_name="Second User"
+        full_name="Second User",
+        email="second@example.com",
+        role="admin"
     )
     db_session.add(user2)
 
@@ -105,7 +117,9 @@ async def test_user_can_be_queried(db_session):
     user = User(
         user_id="query@example.com",
         device_id="device-query",
-        full_name="Query Test"
+        full_name="Query Test",
+        email="query@example.com",
+        role="developer"
     )
     db_session.add(user)
     await db_session.commit()
@@ -120,3 +134,5 @@ async def test_user_can_be_queried(db_session):
     assert found_user.user_id == "query@example.com"
     assert found_user.device_id == "device-query"
     assert found_user.full_name == "Query Test"
+    assert found_user.email == "query@example.com"
+    assert found_user.role == "developer"
