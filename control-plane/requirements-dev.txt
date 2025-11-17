@@ -1,0 +1,5 @@
+# Additional development tools
+ipdb==0.13.13
+pytest-watch==4.2.0
+locust==2.18.0
+debugpy==1.8.0
