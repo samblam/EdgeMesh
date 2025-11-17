@@ -40,6 +40,15 @@ python simulator.py --api https://control-plane.example.com --devices 100
 
 - `--api`: Control plane API URL (default: `http://localhost:8000`)
 - `--devices`: Number of devices to simulate (default: `20`)
+- `--verify-ssl`: Enable SSL certificate verification (default: disabled for testing)
+
+### Security Note
+
+By default, SSL certificate verification is **disabled** (`verify=False`) to simplify local testing with self-signed certificates. In production environments, enable SSL verification:
+
+```bash
+python simulator.py --api https://control-plane.example.com --verify-ssl
+```
 
 ## How It Works
 

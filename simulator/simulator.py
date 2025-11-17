@@ -25,13 +25,16 @@ fake = Faker()
 class DeviceSimulator:
     """Simulate multiple EdgeMesh devices"""
 
-    def __init__(self, api_base: str, num_devices: int = 10):
+    def __init__(self, api_base: str, num_devices: int = 20, verify_ssl: bool = False):
         self.api_base = api_base
         self.devices: List[Dict] = []
         self.num_devices = num_devices
         self.running = True
+        self.verify_ssl = verify_ssl
+        self._client: httpx.AsyncClient = None
 
-        # Setup signal handlers for graceful shutdown
+    def _setup_signal_handlers(self):
+        """Setup signal handlers for graceful shutdown"""
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
@@ -39,6 +42,18 @@ class DeviceSimulator:
         """Handle shutdown signals gracefully"""
         logger.info("\n\nReceived shutdown signal, stopping gracefully...")
         self.running = False
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create reusable HTTP client"""
+        if self._client is None:
+            self._client = httpx.AsyncClient(verify=self.verify_ssl)
+        return self._client
+
+    async def _close_client(self):
+        """Close HTTP client if it exists"""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def initialize_devices(self):
         """Create fake device configurations"""
@@ -73,31 +88,31 @@ class DeviceSimulator:
 
         logger.info("Enrolling devices...")
 
-        async with httpx.AsyncClient(verify=False) as client:
-            for device in self.devices:
-                try:
-                    response = await client.post(
-                        f"{self.api_base}/api/v1/enroll",
-                        json={
-                            "device_id": device["device_id"],
-                            "device_type": device["device_type"],
-                            "enrollment_token": "demo-secret-token-change-in-production",
-                            "os": device["os"],
-                            "os_version": device["os_version"]
-                        },
-                        timeout=10.0
-                    )
+        client = await self._get_client()
+        for device in self.devices:
+            try:
+                response = await client.post(
+                    f"{self.api_base}/api/v1/enroll",
+                    json={
+                        "device_id": device["device_id"],
+                        "device_type": device["device_type"],
+                        "enrollment_token": "demo-secret-token-change-in-production",
+                        "os": device["os"],
+                        "os_version": device["os_version"]
+                    },
+                    timeout=10.0
+                )
 
-                    if response.status_code == 200:
-                        result = response.json()
-                        device["enrolled"] = True
-                        device["device_cert"] = result["certificate"]
-                        logger.info(f"  ✓ {device['device_id']} enrolled")
-                    else:
-                        logger.warning(f"  ✗ {device['device_id']} failed: {response.status_code}")
+                if response.status_code == 200:
+                    result = response.json()
+                    device["enrolled"] = True
+                    device["device_cert"] = result["certificate"]
+                    logger.info(f"  ✓ {device['device_id']} enrolled")
+                else:
+                    logger.warning(f"  ✗ {device['device_id']} failed: {response.status_code}")
 
-                except Exception as e:
-                    logger.error(f"  ✗ {device['device_id']} error: {e}")
+            except Exception as e:
+                logger.error(f"  ✗ {device['device_id']} error: {e}")
 
     async def report_health(self, device: Dict):
         """Report health for single device"""
@@ -116,21 +131,21 @@ class DeviceSimulator:
             }
         }
 
-        async with httpx.AsyncClient(verify=False) as client:
-            try:
-                response = await client.post(
-                    f"{self.api_base}/api/v1/health",
-                    json=health,
-                    timeout=5.0
-                )
+        client = await self._get_client()
+        try:
+            response = await client.post(
+                f"{self.api_base}/api/v1/health",
+                json=health,
+                timeout=5.0
+            )
 
-                if response.status_code == 200:
-                    result = response.json()
-                    status_icon = "✓" if result.get("status") == "healthy" else "✗"
-                    logger.debug(f"{status_icon} {device['device_id']}: {result.get('status')}")
+            if response.status_code == 200:
+                result = response.json()
+                status_icon = "✓" if result.get("status") == "healthy" else "✗"
+                logger.debug(f"{status_icon} {device['device_id']}: {result.get('status')}")
 
-            except Exception as e:
-                logger.error(f"✗ {device['device_id']} health report failed: {e}")
+        except Exception as e:
+            logger.error(f"✗ {device['device_id']} health report failed: {e}")
 
     async def health_reporting_loop(self):
         """Continuously report health for all devices"""
@@ -139,8 +154,7 @@ class DeviceSimulator:
 
         while self.running:
             try:
-                enrolled_devices = [d for d in self.devices if d["enrolled"]]
-                if enrolled_devices:
+                if enrolled_devices := [d for d in self.devices if d["enrolled"]]:
                     await asyncio.gather(
                         *[self.report_health(device) for device in enrolled_devices]
                     )
@@ -163,25 +177,25 @@ class DeviceSimulator:
         services = ["database", "api", "storage", "analytics"]
         service = random.choice(services)
 
-        async with httpx.AsyncClient(verify=False) as client:
-            try:
-                response = await client.post(
-                    f"{self.api_base}/api/v1/connections/request",
-                    json={
-                        "device_id": device["device_id"],
-                        "user_id": device["user_id"],
-                        "service_name": service
-                    },
-                    timeout=5.0
-                )
+        client = await self._get_client()
+        try:
+            response = await client.post(
+                f"{self.api_base}/api/v1/connections/request",
+                json={
+                    "device_id": device["device_id"],
+                    "user_id": device["user_id"],
+                    "service_name": service
+                },
+                timeout=5.0
+            )
 
-                if response.status_code == 200:
-                    logger.info(f"✓ {device['device_id']} → {service} (authorized)")
-                else:
-                    logger.warning(f"✗ {device['device_id']} → {service} (denied: {response.status_code})")
+            if response.status_code == 200:
+                logger.info(f"✓ {device['device_id']} → {service} (authorized)")
+            else:
+                logger.warning(f"✗ {device['device_id']} → {service} (denied: {response.status_code})")
 
-            except Exception as e:
-                logger.error(f"✗ {device['device_id']} connection error: {e}")
+        except Exception as e:
+            logger.error(f"✗ {device['device_id']} connection error: {e}")
 
     async def connection_simulation_loop(self):
         """Continuously request random connections"""
@@ -191,8 +205,7 @@ class DeviceSimulator:
         while self.running:
             try:
                 # Pick 1-3 random devices to request connections
-                enrolled_devices = [d for d in self.devices if d["enrolled"]]
-                if enrolled_devices:
+                if enrolled_devices := [d for d in self.devices if d["enrolled"]]:
                     requesting_devices = random.sample(
                         enrolled_devices,
                         k=min(3, len(enrolled_devices))
@@ -213,24 +226,33 @@ class DeviceSimulator:
     async def run(self):
         """Run full simulation"""
 
-        await self.initialize_devices()
-        await self.enroll_all_devices()
+        # Setup signal handlers
+        self._setup_signal_handlers()
 
-        # Run health reporting and connection simulation concurrently
-        await asyncio.gather(
-            self.health_reporting_loop(),
-            self.connection_simulation_loop()
-        )
+        try:
+            await self.initialize_devices()
+            await self.enroll_all_devices()
+
+            # Run health reporting and connection simulation concurrently
+            await asyncio.gather(
+                self.health_reporting_loop(),
+                self.connection_simulation_loop()
+            )
+        finally:
+            # Cleanup HTTP client
+            await self._close_client()
+            logger.info("Simulator stopped")
 
 
 async def main():
     parser = argparse.ArgumentParser(description="EdgeMesh Device Simulator")
     parser.add_argument("--api", default="http://localhost:8000", help="Control plane API URL")
     parser.add_argument("--devices", type=int, default=20, help="Number of devices to simulate")
+    parser.add_argument("--verify-ssl", action="store_true", help="Enable SSL certificate verification")
 
     args = parser.parse_args()
 
-    simulator = DeviceSimulator(args.api, args.devices)
+    simulator = DeviceSimulator(args.api, args.devices, args.verify_ssl)
     await simulator.run()
 
 
