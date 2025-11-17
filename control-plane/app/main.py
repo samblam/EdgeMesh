@@ -1,7 +1,11 @@
 """EdgeMesh Control Plane API"""
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from app.api.v1 import enrollment, health, connections
 from app.middleware.mtls import MTLSMiddleware
+# Import metrics to register them with Prometheus
+import app.services.metrics  # noqa: F401
 
 app = FastAPI(
     title="EdgeMesh Control Plane",
@@ -28,3 +32,9 @@ async def root():
 async def healthz():
     """Health check endpoint"""
     return {"status": "healthy"}
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics():
+    """Prometheus metrics endpoint"""
+    return generate_latest()

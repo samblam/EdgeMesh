@@ -1,0 +1,41 @@
+groups:
+  - name: edgemesh_alerts
+    interval: 30s
+    rules:
+      - alert: HighAuthorizationFailureRate
+        expr: |
+          (
+            rate(edgemesh_authorization_decisions_total{decision="deny"}[5m])
+            /
+            rate(edgemesh_authorization_decisions_total[5m])
+          ) > 0.10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High authorization failure rate"
+          description: "{{ $value | humanizePercentage }} of authorization requests are being denied"
+
+      - alert: HighUnhealthyDeviceCount
+        expr: |
+          (
+            edgemesh_unhealthy_devices
+            /
+            sum(edgemesh_devices_total)
+          ) > 0.20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High unhealthy device count"
+          description: "{{ $value | humanizePercentage }} of devices are unhealthy"
+
+      - alert: SlowAuthorizationLatency
+        expr: |
+          histogram_quantile(0.95, rate(edgemesh_authorization_latency_seconds_bucket[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow authorization latency"
+          description: "P95 authorization latency is {{ $value }}s (threshold: 0.1s)"

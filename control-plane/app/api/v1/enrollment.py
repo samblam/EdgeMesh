@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.schemas.device import DeviceEnrollmentRequest, DeviceEnrollmentResponse
 from app.services.cert_service import CertificateService
+from app.services.metrics import MetricsService
 from app.models.device import Device
 from app.db.session import get_db
 from app.config import settings
@@ -58,6 +59,8 @@ async def enroll_device(
     try:
         db.add(device)
         await db.commit()
+        # Record successful enrollment
+        MetricsService.record_device_enrollment()
     except IntegrityError:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Device already enrolled")
