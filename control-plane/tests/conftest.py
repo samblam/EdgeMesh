@@ -97,7 +97,6 @@ async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
         """
         import sys
         device = input_data.get("device", {})
-        user = input_data.get("user", {})
 
         device_id = device.get("device_id", "unknown")
         status = device.get("status")
@@ -165,6 +164,8 @@ async def test_user(db_session):
     """Create test user"""
     user = User(
         user_id="test-user-001",
+        device_id="test-device-001",
+        full_name="Test User",
         email="test@example.com",
         role="developer",
         status="active"
@@ -182,6 +183,8 @@ async def admin_user(db_session):
     """Create admin test user"""
     user = User(
         user_id="admin-user-001",
+        device_id="admin-device-001",
+        full_name="Admin User",
         email="admin@example.com",
         role="admin",
         status="active"

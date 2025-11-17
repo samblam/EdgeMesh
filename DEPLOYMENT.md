@@ -509,6 +509,10 @@ grafana:
 #!/bin/bash
 # /opt/edgemesh/backup.sh
 
+# Exit on any error and catch pipeline failures
+set -e
+set -o pipefail
+
 BACKUP_DIR="/backups"
 DATE=$(date +%Y%m%d_%H%M%S)
 BACKUP_FILE="edgemesh_${DATE}.sql.gz"
@@ -522,22 +526,17 @@ aws s3 cp "${BACKUP_DIR}/${BACKUP_FILE}" s3://edgemesh-backups/db/
 # Retain last 30 days locally
 find "${BACKUP_DIR}" -name "edgemesh_*.sql.gz" -mtime +30 -delete
 
-# Verify backup
-if [ $? -eq 0 ]; then
-  echo "Backup successful: ${BACKUP_FILE}"
-else
-  echo "Backup failed!" | mail -s "EdgeMesh Backup Failed" ops@example.com
-fi
+echo "Backup successful: ${BACKUP_FILE}"
 ```
 
-**Cron schedule**:
+**Cron schedule with error handling**:
 
 ```bash
-# Daily at 2 AM
-0 2 * * * /opt/edgemesh/backup.sh
+# Daily at 2 AM with error notification
+0 2 * * * /opt/edgemesh/backup.sh || echo "EdgeMesh backup failed on $(hostname)" | mail -s "EdgeMesh Backup Failed" ops@example.com
 
 # Weekly full backup
-0 3 * * 0 /opt/edgemesh/backup_full.sh
+0 3 * * 0 /opt/edgemesh/backup_full.sh || echo "EdgeMesh full backup failed on $(hostname)" | mail -s "EdgeMesh Full Backup Failed" ops@example.com
 ```
 
 ### 2. Disaster Recovery Procedure

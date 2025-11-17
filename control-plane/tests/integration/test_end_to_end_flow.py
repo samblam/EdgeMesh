@@ -344,7 +344,7 @@ async def test_admin_user_access_outside_business_hours(client, db_session):
     from app.models.user import User
     admin = User(
         user_id="admin-device-user-001",
-        device_id="admin-device-device-001",
+        device_id="admin-device-001",
         full_name="Test User",
         email="admin-device@example.com",
         role="admin",
