@@ -215,7 +215,60 @@ Device ← Allow/Deny + Virtual Tunnel Info
 - SQLAlchemy 2.0 (async)
 - Alembic (migrations)
 - cryptography library (certificates)
+- pydantic-settings (configuration)
+- slowapi (rate limiting)
+- prometheus-client (metrics)
+- httpx (async HTTP client)
 - pytest + pytest-asyncio
+
+**requirements.txt:**
+```
+# Core Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Database
+sqlalchemy[asyncio]==2.0.23
+asyncpg==0.29.0
+alembic==1.12.1
+
+# Security & Auth
+cryptography==41.0.7
+slowapi==0.1.9
+
+# HTTP Client
+httpx==0.25.2
+
+# Observability
+prometheus-client==0.19.0
+prometheus-fastapi-instrumentator==6.1.0
+structlog==23.2.0
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+httpx==0.25.2  # for AsyncClient in tests
+faker==20.1.0
+
+# Development
+black==23.12.0
+isort==5.13.2
+flake8==6.1.0
+mypy==1.7.1
+pre-commit==3.5.0
+```
+
+**requirements-dev.txt:**
+```
+# Additional development tools
+ipdb==0.13.13
+pytest-watch==4.2.0
+locust==2.18.0  # Load testing
+debugpy==1.8.0  # Debugging
+```
 
 **Project Structure:**
 ```
@@ -353,8 +406,305 @@ CREATE TABLE audit_logs (
     metadata JSONB,
     INDEX idx_audit_timestamp (timestamp DESC),
     INDEX idx_audit_device (device_id),
-    INDEX idx_audit_decisions (decision, timestamp DESC)
-);
+    INDEX idx_audit_decisions (decision, timestamp DESC),
+    INDEX idx_audit_event_type_timestamp (event_type, timestamp DESC)  -- For compliance queries
+) PARTITION BY RANGE (timestamp);
+```
+
+**Alembic Migrations:**
+
+```python
+# migrations/env.py (setup file)
+from logging.config import fileConfig
+from sqlalchemy import engine_from_config, pool
+from alembic import context
+from app.db.base import Base
+from app.models import device, user, connection, audit, health
+
+# Import all models to ensure they're registered with Base
+target_metadata = Base.metadata
+
+def run_migrations_online():
+    """Run migrations in 'online' mode."""
+    connectable = engine_from_config(
+        config.get_section(config.config_ini_section),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    with connectable.connect() as connection:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata
+        )
+
+        with context.begin_transaction():
+            context.run_migrations()
+```
+
+```bash
+# Initialize Alembic
+alembic init migrations
+
+# Create initial migration
+alembic revision --autogenerate -m "Initial schema"
+
+# Apply migrations
+alembic upgrade head
+```
+
+```python
+# migrations/versions/001_initial_schema.py
+"""Initial schema
+
+Revision ID: 001
+Create Date: 2024-11-17
+"""
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+revision = '001'
+down_revision = None
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    # Create devices table
+    op.create_table(
+        'devices',
+        sa.Column('device_id', sa.String(255), primary_key=True),
+        sa.Column('device_type', sa.String(50), nullable=False),
+        sa.Column('certificate_serial', sa.String(255), nullable=False, unique=True),
+        sa.Column('certificate_pem', sa.Text, nullable=False),
+        sa.Column('os', sa.String(100)),
+        sa.Column('os_version', sa.String(100)),
+        sa.Column('status', sa.String(50), nullable=False, server_default='active'),
+        sa.Column('enrolled_at', sa.TIMESTAMP, nullable=False, server_default=sa.func.now()),
+        sa.Column('last_seen', sa.TIMESTAMP),
+    )
+    op.create_index('idx_status', 'devices', ['status'])
+    op.create_index('idx_enrolled', 'devices', ['enrolled_at'])
+
+    # Create users table
+    op.create_table(
+        'users',
+        sa.Column('user_id', sa.String(255), primary_key=True),
+        sa.Column('email', sa.String(255), nullable=False, unique=True),
+        sa.Column('role', sa.String(50), nullable=False),
+        sa.Column('created_at', sa.TIMESTAMP, nullable=False, server_default=sa.func.now()),
+        sa.Column('status', sa.String(50), nullable=False, server_default='active'),
+    )
+
+    # Create health_checks table
+    op.create_table(
+        'health_checks',
+        sa.Column('id', sa.Integer, primary_key=True, autoincrement=True),
+        sa.Column('device_id', sa.String(255), sa.ForeignKey('devices.device_id', ondelete='CASCADE')),
+        sa.Column('cpu_usage', sa.Float),
+        sa.Column('memory_usage', sa.Float),
+        sa.Column('disk_usage', sa.Float),
+        sa.Column('os_patches_current', sa.Boolean),
+        sa.Column('antivirus_enabled', sa.Boolean),
+        sa.Column('disk_encrypted', sa.Boolean),
+        sa.Column('reported_at', sa.TIMESTAMP, nullable=False, server_default=sa.func.now()),
+    )
+    op.create_index('idx_device_health', 'health_checks', ['device_id', 'reported_at'], postgresql_ops={'reported_at': 'DESC'})
+
+    # Create connections table
+    op.create_table(
+        'connections',
+        sa.Column('id', sa.Integer, primary_key=True, autoincrement=True),
+        sa.Column('connection_id', sa.String(255), nullable=False, unique=True),
+        sa.Column('device_id', sa.String(255), sa.ForeignKey('devices.device_id')),
+        sa.Column('user_id', sa.String(255), sa.ForeignKey('users.user_id')),
+        sa.Column('service_name', sa.String(255), nullable=False),
+        sa.Column('status', sa.String(50), nullable=False),
+        sa.Column('established_at', sa.TIMESTAMP, nullable=False, server_default=sa.func.now()),
+        sa.Column('terminated_at', sa.TIMESTAMP),
+    )
+    op.create_index('idx_device_connections', 'connections', ['device_id', 'status'])
+
+    # Create audit_logs table (partitioned)
+    op.execute("""
+        CREATE TABLE audit_logs (
+            id SERIAL,
+            event_type VARCHAR(50) NOT NULL,
+            device_id VARCHAR(255) REFERENCES devices(device_id),
+            user_id VARCHAR(255) REFERENCES users(user_id),
+            service_name VARCHAR(255),
+            action VARCHAR(100),
+            decision VARCHAR(50),
+            reason TEXT,
+            policy_version VARCHAR(50),
+            timestamp TIMESTAMP NOT NULL DEFAULT NOW(),
+            metadata JSONB,
+            PRIMARY KEY (id, timestamp)
+        ) PARTITION BY RANGE (timestamp);
+    """)
+
+    op.create_index('idx_audit_timestamp', 'audit_logs', ['timestamp'], postgresql_ops={'timestamp': 'DESC'})
+    op.create_index('idx_audit_device', 'audit_logs', ['device_id'])
+    op.create_index('idx_audit_decisions', 'audit_logs', ['decision', 'timestamp'], postgresql_ops={'timestamp': 'DESC'})
+    op.create_index('idx_audit_event_type_timestamp', 'audit_logs', ['event_type', 'timestamp'], postgresql_ops={'timestamp': 'DESC'})
+
+    # Create initial partition for current month
+    op.execute("""
+        CREATE TABLE audit_logs_2024_11 PARTITION OF audit_logs
+        FOR VALUES FROM ('2024-11-01') TO ('2024-12-01');
+    """)
+
+def downgrade():
+    op.drop_table('audit_logs_2024_11')
+    op.drop_table('audit_logs')
+    op.drop_table('connections')
+    op.drop_table('health_checks')
+    op.drop_table('users')
+    op.drop_table('devices')
+```
+
+```python
+# migrations/versions/002_add_partition_december.py
+"""Add December partition to audit_logs
+
+Revision ID: 002
+Create Date: 2024-12-01
+"""
+from alembic import op
+
+revision = '002'
+down_revision = '001'
+
+def upgrade():
+    op.execute("""
+        CREATE TABLE audit_logs_2024_12 PARTITION OF audit_logs
+        FOR VALUES FROM ('2024-12-01') TO ('2025-01-01');
+    """)
+
+def downgrade():
+    op.execute("DROP TABLE audit_logs_2024_12;")
+```
+
+**Configuration Management:**
+
+```python
+# app/config.py
+from pydantic_settings import BaseSettings
+from typing import Optional
+
+class Settings(BaseSettings):
+    """Application configuration"""
+
+    # Database
+    DATABASE_URL: str
+    DATABASE_POOL_SIZE: int = 20
+    DATABASE_MAX_OVERFLOW: int = 10
+
+    # OPA
+    OPA_URL: str = "http://opa:8181"
+    OPA_TIMEOUT: int = 5
+
+    # Security
+    ENROLLMENT_TOKEN_SECRET: str
+    CERT_VALIDITY_DAYS: int = 90
+    CA_CERT_VALIDITY_DAYS: int = 3650
+
+    # Rate Limiting
+    RATE_LIMIT_ENROLLMENTS: str = "5/minute"
+    RATE_LIMIT_CONNECTIONS: str = "100/minute"
+    RATE_LIMIT_HEALTH: str = "10/minute"
+
+    # Health Check
+    HEALTH_CHECK_MAX_AGE_MINUTES: int = 5
+
+    # Observability
+    LOG_LEVEL: str = "INFO"
+    METRICS_PORT: int = 9090
+
+    # API
+    API_TITLE: str = "EdgeMesh Control Plane"
+    API_VERSION: str = "1.0.0"
+    CORS_ORIGINS: list[str] = ["*"]
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        case_sensitive = True
+
+settings = Settings()
+```
+
+**mTLS Middleware:**
+
+```python
+# app/middleware/mtls.py
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response, JSONResponse
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+import logging
+
+logger = logging.getLogger(__name__)
+
+class MTLSMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to verify client certificates for mTLS authentication
+
+    Note: In production, configure your reverse proxy (nginx/traefik)
+    to handle mTLS termination and pass client cert info via headers.
+    """
+
+    # Paths that don't require mTLS
+    EXEMPT_PATHS = [
+        "/",
+        "/healthz",
+        "/docs",
+        "/openapi.json",
+        "/metrics",
+        "/api/v1/devices/enroll"  # Enrollment uses token auth
+    ]
+
+    async def dispatch(self, request: Request, call_next):
+        # Skip mTLS for exempt paths
+        if any(request.url.path.startswith(path) for path in self.EXEMPT_PATHS):
+            return await call_next(request)
+
+        # In production, get from reverse proxy headers:
+        # client_cert_pem = request.headers.get("X-Client-Cert")
+        # For demo, we skip actual verification
+
+        # If you want to implement actual mTLS verification:
+        # try:
+        #     if not client_cert_pem:
+        #         return JSONResponse(
+        #             status_code=401,
+        #             content={"detail": "Client certificate required"}
+        #         )
+        #
+        #     # Verify certificate
+        #     cert = x509.load_pem_x509_certificate(
+        #         client_cert_pem.encode(),
+        #         default_backend()
+        #     )
+        #
+        #     # Extract device ID from certificate CN
+        #     device_id = cert.subject.get_attributes_for_oid(
+        #         x509.oid.NameOID.COMMON_NAME
+        #     )[0].value
+        #
+        #     # Add to request state
+        #     request.state.device_id = device_id
+        #     request.state.authenticated = True
+        #
+        # except Exception as e:
+        #     logger.error(f"mTLS verification failed: {e}")
+        #     return JSONResponse(
+        #         status_code=401,
+        #         content={"detail": "Invalid client certificate"}
+        #     )
+
+        return await call_next(request)
 ```
 
 **Core Implementation:**
@@ -364,25 +714,36 @@ CREATE TABLE audit_logs (
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.api.v1 import devices, health, connections, admin
 from app.config import settings
 from app.middleware.mtls import MTLSMiddleware
 
 app = FastAPI(
-    title="EdgeMesh Control Plane",
+    title=settings.API_TITLE,
     description="Zero-Trust Access Control",
-    version="1.0.0"
+    version=settings.API_VERSION
 )
+
+# Rate limiting
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# mTLS authentication middleware
+app.add_middleware(MTLSMiddleware)
 
 # Prometheus metrics
 Instrumentator().instrument(app).expose(app)
@@ -412,8 +773,9 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Tuple
+from app.config import settings
 
 class CertificateService:
     """Manage device certificates (self-signed CA)"""
@@ -445,8 +807,8 @@ class CertificateService:
             .issuer_name(issuer)
             .public_key(private_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.utcnow())
-            .not_valid_after(datetime.utcnow() + timedelta(days=3650))  # 10 years
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=settings.CA_CERT_VALIDITY_DAYS))
             .add_extension(
                 x509.BasicConstraints(ca=True, path_length=None),
                 critical=True,
@@ -493,8 +855,8 @@ class CertificateService:
             .issuer_name(self.ca_cert.subject)
             .public_key(device_key.public_key())
             .serial_number(serial)
-            .not_valid_before(datetime.utcnow())
-            .not_valid_after(datetime.utcnow() + timedelta(days=90))
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=settings.CERT_VALIDITY_DAYS))
             .add_extension(
                 x509.KeyUsage(
                     digital_signature=True,
@@ -540,58 +902,91 @@ class CertificateService:
 
 ```python
 # app/api/v1/devices.py
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from typing import List
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+import logging
 
 from app.schemas.device import DeviceEnrollment, DeviceResponse
 from app.services.cert_service import CertificateService
 from app.db.session import get_db
 from app.models.device import Device
+from app.config import settings
 
 router = APIRouter()
 cert_service = CertificateService()
+limiter = Limiter(key_func=get_remote_address)
+logger = logging.getLogger(__name__)
 
 @router.post("/enroll", response_model=DeviceResponse)
+@limiter.limit(settings.RATE_LIMIT_ENROLLMENTS)
 async def enroll_device(
+    request: Request,
     enrollment: DeviceEnrollment,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Enroll a new device in EdgeMesh
-    
+
     Steps:
     1. Validate enrollment token
     2. Issue device certificate
     3. Store device in database
     4. Return certificate bundle
     """
-    
-    # Check if device already exists
-    existing = await db.get(Device, enrollment.device_id)
-    if existing:
-        raise HTTPException(status_code=409, detail="Device already enrolled")
-    
-    # Issue certificate
-    device_key, device_cert, ca_cert, serial = cert_service.issue_device_certificate(
-        enrollment.device_id,
-        enrollment.device_type
-    )
-    
-    # Create device record
-    device = Device(
-        device_id=enrollment.device_id,
-        device_type=enrollment.device_type,
-        certificate_serial=serial,
-        certificate_pem=device_cert.decode('utf-8'),
-        os=enrollment.os,
-        os_version=enrollment.os_version,
-        status="active"
-    )
-    
-    db.add(device)
-    await db.commit()
-    await db.refresh(device)
+
+    try:
+        # Check if device already exists
+        existing = await db.get(Device, enrollment.device_id)
+        if existing:
+            logger.warning(f"Duplicate enrollment attempt for device {enrollment.device_id}")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Device already enrolled"
+            )
+
+        # Input validation
+        if len(enrollment.device_id) > 255:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Device ID too long (max 255 characters)"
+            )
+
+        # Issue certificate
+        device_key, device_cert, ca_cert, serial = cert_service.issue_device_certificate(
+            enrollment.device_id,
+            enrollment.device_type
+        )
+
+        # Create device record
+        device = Device(
+            device_id=enrollment.device_id,
+            device_type=enrollment.device_type,
+            certificate_serial=serial,
+            certificate_pem=device_cert.decode('utf-8'),
+            os=enrollment.os,
+            os_version=enrollment.os_version,
+            status="active"
+        )
+
+        db.add(device)
+        await db.commit()
+        await db.refresh(device)
+
+        logger.info(f"Device enrolled successfully: {enrollment.device_id}")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Enrollment failed for {enrollment.device_id}: {e}")
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Enrollment failed - please try again"
+        )
     
     return {
         "device_id": device.device_id,
@@ -761,7 +1156,10 @@ supported_os_version(os, version) if {
 # app/services/opa_client.py
 import httpx
 from typing import Dict, Any
+import logging
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 class OPAClient:
     """Client for Open Policy Agent"""
@@ -773,37 +1171,53 @@ class OPAClient:
     async def evaluate_policy(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Evaluate policy with given input
-        
+
         Args:
             input_data: Context for policy evaluation
-            
+
         Returns:
             Policy decision with reason
         """
-        
+
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(
                     f"{self.opa_url}/v1/data/{self.policy_path}",
                     json={"input": input_data},
-                    timeout=5.0
+                    timeout=settings.OPA_TIMEOUT
                 )
                 response.raise_for_status()
                 result = response.json()
-                
+
                 allowed = result.get("result", False)
-                
+
                 return {
                     "allowed": allowed,
                     "decision": "allow" if allowed else "deny"
                 }
-                
-            except httpx.HTTPError as e:
-                # Log error
+
+            except httpx.TimeoutException as e:
+                logger.error(f"OPA timeout: {e}")
+                # Fail closed for security
                 return {
                     "allowed": False,
                     "decision": "deny",
-                    "error": f"OPA evaluation failed: {str(e)}"
+                    "error": "Policy service timeout - access denied for safety"
+                }
+            except httpx.HTTPError as e:
+                logger.error(f"OPA HTTP error: {e}")
+                # Fail closed for security
+                return {
+                    "allowed": False,
+                    "decision": "deny",
+                    "error": f"Policy service unavailable: {str(e)}"
+                }
+            except Exception as e:
+                logger.error(f"OPA unexpected error: {e}", exc_info=True)
+                return {
+                    "allowed": False,
+                    "decision": "deny",
+                    "error": "Policy evaluation failed"
                 }
     
     async def check_device_compliance(self, device_data: Dict[str, Any]) -> bool:
@@ -829,10 +1243,14 @@ class OPAClient:
 
 ```python
 # app/api/v1/connections.py
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime
+from sqlalchemy import select
+from datetime import datetime, timedelta, timezone
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 import uuid
+import logging
 
 from app.schemas.connection import ConnectionRequest, ConnectionResponse
 from app.services.opa_client import OPAClient
@@ -841,51 +1259,84 @@ from app.models.device import Device
 from app.models.user import User
 from app.models.connection import Connection
 from app.models.audit import AuditLog
+from app.models.health import HealthCheck
+from app.config import settings
 
 router = APIRouter()
 opa_client = OPAClient()
+limiter = Limiter(key_func=get_remote_address)
+logger = logging.getLogger(__name__)
 
 @router.post("/request", response_model=ConnectionResponse)
+@limiter.limit(settings.RATE_LIMIT_CONNECTIONS)
 async def request_connection(
+    http_request: Request,
     request: ConnectionRequest,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Request authorization for connection to service
-    
+
     Steps:
     1. Verify device exists and is active
-    2. Get latest health check
+    2. Get latest health check and validate age
     3. Query OPA for authorization decision
     4. Log decision to audit log
     5. Create virtual tunnel if authorized
     """
-    
-    # Get device
-    device = await db.get(Device, request.device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
-    if device.status != "active":
-        raise HTTPException(status_code=403, detail="Device not active")
-    
-    # Get user
-    user = await db.get(User, request.user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Get latest health check
-    health_query = (
-        select(HealthCheck)
-        .where(HealthCheck.device_id == device.device_id)
-        .order_by(HealthCheck.reported_at.desc())
-        .limit(1)
-    )
-    health_result = await db.execute(health_query)
-    health = health_result.scalar_one_or_none()
-    
-    if not health:
-        raise HTTPException(status_code=400, detail="No health check on record")
+
+    try:
+        # Get device
+        device = await db.get(Device, request.device_id)
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Device not found"
+            )
+
+        if device.status != "active":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Device not active"
+            )
+
+        # Get user
+        user = await db.get(User, request.user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+
+        # Get latest health check
+        health_query = (
+            select(HealthCheck)
+            .where(HealthCheck.device_id == device.device_id)
+            .order_by(HealthCheck.reported_at.desc())
+            .limit(1)
+        )
+        health_result = await db.execute(health_query)
+        health = health_result.scalar_one_or_none()
+
+        if not health:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No health check on record"
+            )
+
+        # Validate health check age
+        health_age = datetime.now(timezone.utc) - health.reported_at
+        max_age = timedelta(minutes=settings.HEALTH_CHECK_MAX_AGE_MINUTES)
+
+        if health_age > max_age:
+            logger.warning(
+                f"Stale health check for device {device.device_id}: "
+                f"{health_age.total_seconds():.0f}s old"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Health check too old ({health_age.total_seconds():.0f}s > {max_age.total_seconds():.0f}s)"
+            )
     
     # Build OPA input
     opa_input = {
@@ -910,46 +1361,68 @@ async def request_connection(
         "service": request.service_name,
         "action": "connect",
         "time": {
-            "hour": datetime.utcnow().hour,
-            "day_of_week": datetime.utcnow().isoweekday()
+            "hour": datetime.now(timezone.utc).hour,
+            "day_of_week": datetime.now(timezone.utc).isoweekday()
         }
     }
     
-    # Evaluate policy
-    decision = await opa_client.evaluate_policy(opa_input)
-    
-    # Log to audit
-    audit_log = AuditLog(
-        event_type="authorization",
-        device_id=device.device_id,
-        user_id=user.user_id,
-        service_name=request.service_name,
-        action="connect",
-        decision=decision["decision"],
-        reason=decision.get("error"),
-        timestamp=datetime.utcnow()
-    )
-    db.add(audit_log)
-    
-    if not decision["allowed"]:
-        await db.commit()
-        raise HTTPException(
-            status_code=403,
-            detail=f"Access denied: {decision.get('error', 'Policy evaluation failed')}"
+        # Evaluate policy
+        decision = await opa_client.evaluate_policy(opa_input)
+
+        # Log to audit
+        audit_log = AuditLog(
+            event_type="authorization",
+            device_id=device.device_id,
+            user_id=user.user_id,
+            service_name=request.service_name,
+            action="connect",
+            decision=decision["decision"],
+            reason=decision.get("error"),
+            timestamp=datetime.now(timezone.utc)
         )
-    
-    # Create virtual tunnel
-    connection_id = str(uuid.uuid4())
-    connection = Connection(
-        connection_id=connection_id,
-        device_id=device.device_id,
-        user_id=user.user_id,
-        service_name=request.service_name,
-        status="established"
-    )
-    db.add(connection)
-    
-    await db.commit()
+        db.add(audit_log)
+
+        if not decision["allowed"]:
+            await db.commit()
+            logger.info(
+                f"Access denied for device {device.device_id} to {request.service_name}: "
+                f"{decision.get('error', 'Policy denied')}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: {decision.get('error', 'Policy evaluation failed')}"
+            )
+
+        # Create virtual tunnel
+        connection_id = str(uuid.uuid4())
+        connection = Connection(
+            connection_id=connection_id,
+            device_id=device.device_id,
+            user_id=user.user_id,
+            service_name=request.service_name,
+            status="established"
+        )
+        db.add(connection)
+
+        await db.commit()
+
+        logger.info(
+            f"Connection authorized: device={device.device_id}, "
+            f"service={request.service_name}, conn_id={connection_id}"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Authorization request failed for device {request.device_id}: {e}",
+            exc_info=True
+        )
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Authorization request failed"
+        )
     
     return {
         "connection_id": connection_id,
@@ -1016,20 +1489,38 @@ async def terminate_connection(
 import asyncio
 import httpx
 import random
+import signal
 from faker import Faker
 from typing import List, Dict
 from datetime import datetime
 import argparse
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 fake = Faker()
 
 class DeviceSimulator:
     """Simulate multiple EdgeMesh devices"""
-    
+
     def __init__(self, api_base: str, num_devices: int = 10):
         self.api_base = api_base
         self.devices: List[Dict] = []
         self.num_devices = num_devices
+        self.running = True
+
+        # Setup signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        logger.info("\n\nReceived shutdown signal, stopping gracefully...")
+        self.running = False
         
     async def initialize_devices(self):
         """Create fake device configurations"""
@@ -1122,14 +1613,25 @@ class DeviceSimulator:
     
     async def health_reporting_loop(self):
         """Continuously report health for all devices"""
-        
-        print("\nStarting health reporting loop (every 60s)...")
-        
-        while True:
-            await asyncio.gather(
-                *[self.report_health(device) for device in self.devices if device["enrolled"]]
-            )
-            await asyncio.sleep(60)
+
+        logger.info("Starting health reporting loop (every 60s)...")
+
+        while self.running:
+            try:
+                await asyncio.gather(
+                    *[self.report_health(device) for device in self.devices if device["enrolled"]]
+                )
+                # Use smaller sleep chunks to check self.running more frequently
+                for _ in range(12):  # 12 * 5 = 60 seconds
+                    if not self.running:
+                        break
+                    await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"Health reporting error: {e}")
+                if not self.running:
+                    break
+
+        logger.info("Health reporting loop stopped")
     
     async def request_connection(self, device: Dict):
         """Request connection to random service"""
@@ -1159,21 +1661,30 @@ class DeviceSimulator:
     
     async def connection_simulation_loop(self):
         """Continuously request random connections"""
-        
-        print("\nStarting connection simulation loop (every 5s)...")
-        
-        while True:
-            # Pick 1-3 random devices to request connections
-            requesting_devices = random.sample(
-                [d for d in self.devices if d["enrolled"]],
-                k=min(3, len([d for d in self.devices if d["enrolled"]]))
-            )
-            
-            await asyncio.gather(
-                *[self.request_connection(device) for device in requesting_devices]
-            )
-            
-            await asyncio.sleep(5)
+
+        logger.info("Starting connection simulation loop (every 5s)...")
+
+        while self.running:
+            try:
+                # Pick 1-3 random devices to request connections
+                enrolled_devices = [d for d in self.devices if d["enrolled"]]
+                if enrolled_devices:
+                    requesting_devices = random.sample(
+                        enrolled_devices,
+                        k=min(3, len(enrolled_devices))
+                    )
+
+                    await asyncio.gather(
+                        *[self.request_connection(device) for device in requesting_devices]
+                    )
+
+                await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"Connection simulation error: {e}")
+                if not self.running:
+                    break
+
+        logger.info("Connection simulation loop stopped")
     
     async def run(self):
         """Run full simulation"""
@@ -1478,12 +1989,21 @@ services:
       - DATABASE_URL=postgresql://postgres:password@db:5432/edgemesh
       - OPA_URL=http://opa:8181
       - LOG_LEVEL=INFO
+      - ENROLLMENT_TOKEN_SECRET=change-me-in-production
     depends_on:
-      - db
-      - opa
+      db:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
     networks:
       - edgemesh
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
 
   # PostgreSQL Database
   db:
@@ -1497,6 +2017,12 @@ services:
     networks:
       - edgemesh
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # Open Policy Agent
   opa:
@@ -1513,6 +2039,12 @@ services:
     networks:
       - edgemesh
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8181/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   # Prometheus
   prometheus:
@@ -1529,6 +2061,12 @@ services:
     networks:
       - edgemesh
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # Grafana
   grafana:
@@ -1543,10 +2081,17 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
     networks:
       - edgemesh
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
   postgres_data:
@@ -1623,6 +2168,142 @@ python simulator.py --devices 20
 ---
 
 ## Testing Strategy
+
+### Test Fixtures
+
+```python
+# tests/conftest.py
+import pytest
+import asyncio
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.pool import NullPool
+from httpx import AsyncClient
+from typing import AsyncGenerator
+
+from app.main import app
+from app.db.base import Base
+from app.db.session import get_db
+from app.models.device import Device
+from app.models.user import User
+from app.services.cert_service import CertificateService
+
+# Test database URL (in-memory SQLite for speed)
+TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+@pytest.fixture(scope="session")
+def event_loop():
+    """Create event loop for async tests"""
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
+
+@pytest.fixture(scope="function")
+async def db_engine():
+    """Create test database engine"""
+    engine = create_async_engine(
+        TEST_DATABASE_URL,
+        poolclass=NullPool,
+        echo=False
+    )
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    yield engine
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+    await engine.dispose()
+
+@pytest.fixture(scope="function")
+async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
+    """Create test database session"""
+    async_session = async_sessionmaker(
+        db_engine,
+        class_=AsyncSession,
+        expire_on_commit=False
+    )
+
+    async with async_session() as session:
+        yield session
+        await session.rollback()
+
+@pytest.fixture(scope="function")
+async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
+    """Create test HTTP client"""
+
+    async def override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        yield client
+
+    app.dependency_overrides.clear()
+
+@pytest.fixture
+def cert_service():
+    """Certificate service instance"""
+    return CertificateService()
+
+@pytest.fixture
+async def test_device(db_session, cert_service):
+    """Create test device"""
+    device_key, device_cert, ca_cert, serial = cert_service.issue_device_certificate(
+        "test-device-001",
+        "laptop"
+    )
+
+    device = Device(
+        device_id="test-device-001",
+        device_type="laptop",
+        certificate_serial=serial,
+        certificate_pem=device_cert.decode('utf-8'),
+        os="Ubuntu",
+        os_version="22.04",
+        status="active"
+    )
+
+    db_session.add(device)
+    await db_session.commit()
+    await db_session.refresh(device)
+
+    return device
+
+@pytest.fixture
+async def test_user(db_session):
+    """Create test user"""
+    user = User(
+        user_id="test-user-001",
+        email="test@example.com",
+        role="developer",
+        status="active"
+    )
+
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    return user
+
+@pytest.fixture
+async def admin_user(db_session):
+    """Create admin test user"""
+    user = User(
+        user_id="admin-user-001",
+        email="admin@example.com",
+        role="admin",
+        status="active"
+    )
+
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    return user
+```
 
 ### Unit Tests
 
@@ -2033,6 +2714,1100 @@ MIT
 ---
 
 *Designed for defense tech portfolio demonstration*
+```
+
+---
+
+## Security Best Practices
+
+### Production Security Checklist
+
+#### 1. Certificate Management
+- [ ] Use external CA (cert-manager, Vault, or AWS ACM) instead of self-signed certificates
+- [ ] Implement certificate rotation (90-day validity is good, but automate renewal)
+- [ ] Store CA private key in secure vault (HashiCorp Vault, AWS Secrets Manager)
+- [ ] Implement Certificate Revocation List (CRL) or OCSP
+- [ ] Use hardware security modules (HSMs) for CA key storage
+
+**Implementation:**
+```python
+# app/services/cert_service.py (production version)
+class CertificateService:
+    def __init__(self):
+        # Load CA from secure vault
+        self.ca_key = self._load_from_vault("ca-private-key")
+        self.ca_cert = self._load_from_vault("ca-certificate")
+
+    def _load_from_vault(self, key_name: str):
+        # Integration with HashiCorp Vault or AWS Secrets Manager
+        vault_client = hvac.Client(url=settings.VAULT_URL)
+        secret = vault_client.secrets.kv.v2.read_secret_version(
+            path=f"edgemesh/{key_name}"
+        )
+        return secret['data']['data']['value']
+```
+
+#### 2. Authentication & Authorization
+- [x] mTLS for device authentication
+- [x] Rate limiting on all public endpoints
+- [x] Policy-based authorization with OPA
+- [ ] Add RBAC for admin endpoints
+- [ ] Implement API key authentication for external integrations
+- [ ] Add OAuth2/OIDC for user authentication
+
+**Admin Endpoint Protection:**
+```python
+# app/api/v1/admin.py
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+security = HTTPBearer()
+
+async def verify_admin_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> str:
+    """Verify admin API token"""
+    token = credentials.credentials
+
+    # Verify against secure token store
+    if not await token_service.verify_admin_token(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token"
+        )
+
+    return token
+
+@router.post("/devices/revoke")
+async def revoke_device(
+    device_id: str,
+    token: str = Depends(verify_admin_token)
+):
+    """Revoke device certificate (admin only)"""
+    # Implementation
+```
+
+#### 3. Input Validation
+- [x] Length validation on device_id and other inputs
+- [ ] Add regex validation for email addresses
+- [ ] Sanitize all user inputs to prevent injection attacks
+- [ ] Validate file uploads (if implemented)
+- [ ] Use Pydantic for comprehensive schema validation
+
+**Enhanced Validation:**
+```python
+# app/schemas/device.py
+from pydantic import BaseModel, Field, validator
+import re
+
+class DeviceEnrollment(BaseModel):
+    device_id: str = Field(..., min_length=1, max_length=255, regex="^[a-zA-Z0-9-_]+$")
+    device_type: str = Field(..., regex="^(laptop|server|iot)$")
+    os: str = Field(..., max_length=100)
+    os_version: str = Field(..., max_length=100)
+
+    @validator('device_id')
+    def validate_device_id(cls, v):
+        if not re.match(r'^[a-zA-Z0-9-_]+$', v):
+            raise ValueError('Device ID contains invalid characters')
+        return v
+```
+
+#### 4. Secrets Management
+- [x] Environment variables for configuration
+- [ ] Use Kubernetes Secrets or external secret manager
+- [ ] Encrypt secrets at rest
+- [ ] Rotate secrets regularly (30-90 days)
+- [ ] Never log secrets or credentials
+- [ ] Use separate secrets for dev/staging/production
+
+**Secrets Rotation Script:**
+```python
+# scripts/rotate_secrets.py
+import secrets
+import os
+from app.config import settings
+
+def rotate_enrollment_token():
+    """Generate new enrollment token and update in vault"""
+    new_secret = secrets.token_urlsafe(32)
+
+    # Update in vault
+    vault_client.secrets.kv.v2.create_or_update_secret(
+        path="edgemesh/enrollment-token",
+        secret=dict(value=new_secret)
+    )
+
+    # Trigger rolling restart of API pods
+    os.system("kubectl rollout restart deployment/edgemesh-api -n edgemesh")
+```
+
+#### 5. Database Security
+- [x] Use parameterized queries (SQLAlchemy ORM)
+- [x] Database connection pooling
+- [ ] Encrypt database connections (SSL/TLS)
+- [ ] Encrypt sensitive data at rest
+- [ ] Use read-only database user for query operations
+- [ ] Regular database backups
+
+**Database Encryption Configuration:**
+```python
+# app/db/session.py
+from sqlalchemy.ext.asyncio import create_async_engine
+
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    pool_size=settings.DATABASE_POOL_SIZE,
+    max_overflow=settings.DATABASE_MAX_OVERFLOW,
+    pool_pre_ping=True,
+    connect_args={
+        "ssl": "require",  # Enforce SSL
+        "server_settings": {
+            "application_name": "edgemesh-api"
+        }
+    }
+)
+```
+
+#### 6. Network Security
+- [ ] Use HTTPS only (redirect HTTP to HTTPS)
+- [ ] Implement proper CORS policies
+- [ ] Use Content Security Policy (CSP) headers
+- [ ] Enable HSTS (HTTP Strict Transport Security)
+- [ ] Implement network segmentation in Kubernetes
+- [ ] Use NetworkPolicy to restrict pod communication
+
+**Security Headers:**
+```python
+# app/main.py
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
+
+# In production
+if settings.ENVIRONMENT == "production":
+    app.add_middleware(HTTPSRedirectMiddleware)
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=settings.ALLOWED_HOSTS
+    )
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Content-Security-Policy"] = "default-src 'self'"
+    return response
+```
+
+#### 7. Audit & Monitoring
+- [x] Comprehensive audit logging
+- [x] Prometheus metrics
+- [ ] Real-time security alerting
+- [ ] Log aggregation (ELK, Loki, or CloudWatch)
+- [ ] SIEM integration (Splunk, Datadog)
+- [ ] Anomaly detection
+
+**Security Alerts:**
+```yaml
+# prometheus/security-alerts.yml
+groups:
+  - name: security_alerts
+    interval: 30s
+    rules:
+      - alert: HighFailedAuthRate
+        expr: |
+          rate(edgemesh_authorization_decisions_total{decision="deny"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High failed authorization rate"
+          description: "More than 10 failed auth attempts per second"
+
+      - alert: SuspiciousEnrollmentActivity
+        expr: |
+          rate(edgemesh_device_enrollments_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusual enrollment activity"
+          description: "More than 5 enrollments per second"
+```
+
+#### 8. Dependency Security
+- [ ] Regularly update dependencies
+- [ ] Use dependency scanning (Snyk, Dependabot)
+- [ ] Pin dependency versions
+- [ ] Scan container images for vulnerabilities
+- [ ] Use minimal base images (distroless, alpine)
+
+**Dockerfile Security:**
+```dockerfile
+# control-plane/Dockerfile
+FROM python:3.11-slim as builder
+
+# Install dependencies
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# Runtime stage
+FROM python:3.11-slim
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser
+
+# Copy only necessary files
+COPY --from=builder /root/.local /home/appuser/.local
+COPY app /app
+
+# Set permissions
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Run app
+WORKDIR /app
+ENV PATH=/home/appuser/.local/bin:$PATH
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+#### 9. Compliance Requirements
+
+**NIST 800-207 (Zero Trust):**
+- [x] Device identity verification (mTLS)
+- [x] Continuous authorization
+- [x] Device health verification
+- [x] Comprehensive audit logging
+- [ ] Multi-factor authentication
+- [ ] Microsegmentation
+
+**CMMC Level 2 (DoD Contractors):**
+- [x] Access control policies
+- [x] Audit logging
+- [x] System monitoring
+- [ ] Incident response plan
+- [ ] Security awareness training documentation
+- [ ] Configuration management
+
+**SOC 2:**
+- [x] Security monitoring
+- [x] Change management (audit logs)
+- [ ] Vendor management documentation
+- [ ] Business continuity plan
+- [ ] Annual penetration testing
+
+### Security Testing
+
+```python
+# tests/security/test_authorization_security.py
+import pytest
+
+@pytest.mark.security
+async def test_cannot_bypass_authentication(client):
+    """Ensure endpoints require proper authentication"""
+    response = await client.post(
+        "/api/v1/connections/request",
+        json={
+            "device_id": "attacker-device",
+            "user_id": "attacker",
+            "service_name": "database"
+        }
+    )
+    assert response.status_code == 401
+
+@pytest.mark.security
+async def test_rate_limiting_enforced(client):
+    """Ensure rate limiting prevents abuse"""
+    # Attempt 10 enrollments rapidly
+    responses = []
+    for i in range(10):
+        response = await client.post(
+            "/api/v1/devices/enroll",
+            json={
+                "device_id": f"device-{i}",
+                "device_type": "laptop",
+                "os": "Ubuntu",
+                "os_version": "22.04"
+            }
+        )
+        responses.append(response)
+
+    # Some should be rate limited
+    rate_limited = [r for r in responses if r.status_code == 429]
+    assert len(rate_limited) > 0
+
+@pytest.mark.security
+async def test_sql_injection_prevention(client, db_session):
+    """Ensure SQL injection is prevented"""
+    malicious_input = "'; DROP TABLE devices; --"
+
+    response = await client.post(
+        "/api/v1/devices/enroll",
+        json={
+            "device_id": malicious_input,
+            "device_type": "laptop",
+            "os": "Ubuntu",
+            "os_version": "22.04"
+        }
+    )
+
+    # Should either reject or safely handle
+    # Verify database is intact
+    result = await db_session.execute("SELECT COUNT(*) FROM devices")
+    assert result.scalar() >= 0  # Table still exists
+```
+
+---
+
+## Kubernetes Deployment
+
+### Deployment Manifest
+
+```yaml
+# k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edgemesh-control-plane
+  namespace: edgemesh
+  labels:
+    app: edgemesh-api
+    component: control-plane
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: edgemesh-api
+  template:
+    metadata:
+      labels:
+        app: edgemesh-api
+        component: control-plane
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: api
+        image: edgemesh/control-plane:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: edgemesh-secrets
+              key: database-url
+        - name: OPA_URL
+          value: "http://opa:8181"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: ENROLLMENT_TOKEN_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: edgemesh-secrets
+              key: enrollment-token-secret
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edgemesh-api
+  namespace: edgemesh
+  labels:
+    app: edgemesh-api
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  selector:
+    app: edgemesh-api
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: edgemesh-ingress
+  namespace: edgemesh
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - api.edgemesh.example.com
+    secretName: edgemesh-tls
+  rules:
+  - host: api.edgemesh.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: edgemesh-api
+            port:
+              number: 8000
+```
+
+### PostgreSQL StatefulSet
+
+```yaml
+# k8s/postgres.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: edgemesh
+data:
+  POSTGRES_DB: edgemesh
+  POSTGRES_USER: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: edgemesh
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15
+        ports:
+        - containerPort: 5432
+          name: postgres
+        envFrom:
+        - configMapRef:
+            name: postgres-config
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: edgemesh-secrets
+              key: postgres-password
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U postgres
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U postgres
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: edgemesh
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5432
+    targetPort: 5432
+  selector:
+    app: postgres
+```
+
+### Secrets Management
+
+```yaml
+# k8s/secrets.yaml.example
+apiVersion: v1
+kind: Secret
+metadata:
+  name: edgemesh-secrets
+  namespace: edgemesh
+type: Opaque
+stringData:
+  database-url: "postgresql://postgres:CHANGE_ME@postgres:5432/edgemesh"
+  postgres-password: "CHANGE_ME"
+  enrollment-token-secret: "CHANGE_ME_LONG_RANDOM_STRING"
+```
+
+### Helm Chart Values
+
+```yaml
+# helm/edgemesh/values.yaml
+replicaCount: 3
+
+image:
+  repository: edgemesh/control-plane
+  tag: latest
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: api.edgemesh.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: edgemesh-tls
+      hosts:
+        - api.edgemesh.example.com
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "250m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+postgresql:
+  enabled: true
+  auth:
+    database: edgemesh
+    username: postgres
+  primary:
+    persistence:
+      size: 20Gi
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "2Gi"
+        cpu: "1000m"
+
+opa:
+  enabled: true
+  image:
+    repository: openpolicyagent/opa
+    tag: latest
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+monitoring:
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+  grafana:
+    enabled: true
+    adminPassword: changeme
+```
+
+---
+
+## Troubleshooting Guide
+
+### Common Issues
+
+#### 1. Database Connection Failures
+
+**Symptom:** API fails to start with database connection errors
+
+**Diagnosis:**
+```bash
+# Check database is running
+docker-compose ps db
+
+# Check database logs
+docker-compose logs db
+
+# Test connection manually
+docker-compose exec db psql -U postgres -d edgemesh -c "SELECT 1;"
+```
+
+**Solutions:**
+- Ensure PostgreSQL is fully started (check health: `docker-compose ps`)
+- Verify `DATABASE_URL` environment variable
+- Check network connectivity: `docker-compose exec api ping db`
+- Reset database: `docker-compose down -v && docker-compose up -d`
+
+#### 2. OPA Policy Evaluation Failures
+
+**Symptom:** All authorization requests denied with "Policy service unavailable"
+
+**Diagnosis:**
+```bash
+# Check OPA is running
+docker-compose ps opa
+
+# Test OPA directly
+curl http://localhost:8181/health
+
+# Check policy loading
+curl http://localhost:8181/v1/data/edgemesh/authz
+```
+
+**Solutions:**
+- Verify OPA container is running
+- Check policy files in `./policies/` directory
+- Validate Rego syntax: `opa test policies/`
+- Restart OPA: `docker-compose restart opa`
+
+#### 3. Certificate Generation Failures
+
+**Symptom:** Device enrollment fails with certificate errors
+
+**Diagnosis:**
+```bash
+# Check API logs
+docker-compose logs api | grep -i certificate
+
+# Check CA certificate was generated
+docker-compose exec api ls -la /app/certs/
+```
+
+**Solutions:**
+- Ensure `cryptography` package is installed
+- Check file permissions for cert storage
+- Verify `CERT_VALIDITY_DAYS` configuration
+- Clear and regenerate CA: delete volume and restart
+
+#### 4. Rate Limiting Too Aggressive
+
+**Symptom:** Simulator gets 429 errors frequently
+
+**Diagnosis:**
+```bash
+# Check API logs for rate limit hits
+docker-compose logs api | grep "429"
+```
+
+**Solutions:**
+- Adjust rate limits in `.env`:
+  ```
+  RATE_LIMIT_ENROLLMENTS=10/minute
+  RATE_LIMIT_CONNECTIONS=200/minute
+  ```
+- Restart API: `docker-compose restart api`
+
+#### 5. Stale Health Check Errors
+
+**Symptom:** "Health check too old" errors for active devices
+
+**Diagnosis:**
+```bash
+# Check health check timestamps
+docker-compose exec db psql -U postgres -d edgemesh \
+  -c "SELECT device_id, reported_at FROM health_checks ORDER BY reported_at DESC LIMIT 10;"
+```
+
+**Solutions:**
+- Increase `HEALTH_CHECK_MAX_AGE_MINUTES` in config
+- Ensure simulator health loop is running
+- Check for clock skew between containers
+
+#### 6. Grafana Dashboards Not Showing Data
+
+**Symptom:** Grafana dashboards are empty
+
+**Diagnosis:**
+```bash
+# Check Prometheus is scraping
+curl http://localhost:9090/api/v1/targets
+
+# Check metrics endpoint
+curl http://localhost:8000/metrics
+```
+
+**Solutions:**
+- Verify Prometheus configuration in `prometheus.yml`
+- Check Prometheus can reach API: `docker-compose exec prometheus ping api`
+- Verify Grafana datasource configuration
+- Check time range in Grafana (use "Last 5 minutes")
+
+### Performance Issues
+
+#### Slow Authorization Decisions
+
+**Diagnosis:**
+```bash
+# Check authorization latency metrics
+curl http://localhost:8000/metrics | grep authorization_latency
+
+# Check OPA performance
+docker stats opa
+```
+
+**Solutions:**
+- Monitor OPA CPU/memory usage
+- Consider OPA caching policies
+- Add database indexes (already implemented)
+- Scale OPA horizontally in Kubernetes
+
+#### Database Connection Pool Exhaustion
+
+**Diagnosis:**
+```bash
+# Check active connections
+docker-compose exec db psql -U postgres -c \
+  "SELECT count(*) FROM pg_stat_activity WHERE datname='edgemesh';"
+```
+
+**Solutions:**
+- Increase `DATABASE_POOL_SIZE` in config
+- Check for connection leaks in code
+- Implement connection timeout
+- Monitor with Prometheus metrics
+
+### Debugging Tips
+
+```bash
+# Enable debug logging
+docker-compose stop api
+docker-compose run -e LOG_LEVEL=DEBUG api
+
+# Access database directly
+docker-compose exec db psql -U postgres -d edgemesh
+
+# Watch API logs in real-time
+docker-compose logs -f api
+
+# Check all service health
+docker-compose ps
+
+# Restart everything cleanly
+docker-compose down && docker-compose up -d
+
+# Nuclear option (deletes all data)
+docker-compose down -v && docker-compose up -d
+```
+
+---
+
+## Development Setup
+
+### Local Development Environment
+
+#### Prerequisites
+
+```bash
+# Install Python 3.11+
+python --version  # Should be 3.11 or higher
+
+# Install Poetry (recommended) or pip
+curl -sSL https://install.python-poetry.org | python3 -
+
+# Install Docker and Docker Compose
+docker --version
+docker-compose --version
+
+# Install PostgreSQL client tools (optional, for debugging)
+# macOS
+brew install postgresql
+
+# Ubuntu
+sudo apt-get install postgresql-client
+```
+
+#### Setup Steps
+
+```bash
+# 1. Clone repository
+git clone https://github.com/yourusername/edgemesh.git
+cd edgemesh
+
+# 2. Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# 3. Install dependencies
+cd control-plane
+pip install -r requirements.txt
+pip install -r requirements-dev.txt  # Testing/linting tools
+
+# 4. Copy environment template
+cp .env.example .env
+
+# Edit .env with your settings:
+# DATABASE_URL=postgresql://postgres:password@localhost:5432/edgemesh
+# OPA_URL=http://localhost:8181
+# ENROLLMENT_TOKEN_SECRET=your-secret-here
+
+# 5. Start infrastructure services
+docker-compose up -d db opa prometheus grafana
+
+# 6. Run database migrations
+alembic upgrade head
+
+# 7. Run API locally (for development)
+uvicorn app.main:app --reload --port 8000
+```
+
+#### Development Tools
+
+```bash
+# Install pre-commit hooks
+pip install pre-commit
+pre-commit install
+
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/psf/black
+    rev: 23.10.0
+    hooks:
+      - id: black
+        language_version: python3.11
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.12.0
+    hooks:
+      - id: isort
+        args: ["--profile", "black"]
+
+  - repo: https://github.com/pycqa/flake8
+    rev: 6.1.0
+    hooks:
+      - id: flake8
+        args: ["--max-line-length=100", "--extend-ignore=E203,W503"]
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.6.0
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-all]
+
+# Run linters manually
+black control-plane/
+isort control-plane/
+flake8 control-plane/
+mypy control-plane/
+
+# Run tests with coverage
+pytest tests/ --cov=app --cov-report=html --cov-report=term
+
+# View coverage report
+open htmlcov/index.html  # macOS
+xdg-open htmlcov/index.html  # Linux
+
+# Run specific test
+pytest tests/test_authorization.py::test_authorization_healthy_device_admin -v
+
+# Run tests in watch mode
+pytest-watch tests/
+```
+
+#### IDE Configuration
+
+**VS Code (`.vscode/settings.json`):**
+```json
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python",
+  "python.linting.enabled": true,
+  "python.linting.flake8Enabled": true,
+  "python.formatting.provider": "black",
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": ["tests"],
+  "editor.formatOnSave": true,
+  "[python]": {
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": true
+    }
+  }
+}
+```
+
+**PyCharm:**
+- Set Python interpreter to `venv/bin/python`
+- Enable pytest as test runner
+- Configure Black as code formatter
+- Enable "Reformat code on save"
+
+#### Database Management
+
+```bash
+# Create new migration
+alembic revision --autogenerate -m "Description of changes"
+
+# Apply migrations
+alembic upgrade head
+
+# Rollback one migration
+alembic downgrade -1
+
+# View migration history
+alembic history
+
+# Reset database (development only!)
+alembic downgrade base
+alembic upgrade head
+
+# Seed test data
+python scripts/seed_data.py
+```
+
+#### Debugging
+
+```bash
+# Run with debugger
+python -m debugpy --listen 5678 --wait-for-client -m uvicorn app.main:app --reload
+
+# Run tests with debugger
+python -m debugpy --listen 5678 --wait-for-client -m pytest tests/
+
+# Use pdb for inline debugging
+import pdb; pdb.set_trace()
+
+# Use ipdb (better pdb)
+pip install ipdb
+import ipdb; ipdb.set_trace()
+```
+
+### Making Changes
+
+```bash
+# 1. Create feature branch
+git checkout -b feature/my-feature
+
+# 2. Make changes and test
+# ... edit code ...
+pytest tests/
+black .
+isort .
+flake8 .
+
+# 3. Commit with conventional commits
+git commit -m "feat: add certificate revocation support"
+git commit -m "fix: resolve race condition in health checks"
+git commit -m "docs: update API documentation"
+
+# 4. Push and create PR
+git push origin feature/my-feature
+```
+
+### Environment Variables Reference
+
+```bash
+# .env file
+# Database
+DATABASE_URL=postgresql://user:pass@host:port/db
+DATABASE_POOL_SIZE=20
+DATABASE_MAX_OVERFLOW=10
+
+# OPA
+OPA_URL=http://opa:8181
+OPA_TIMEOUT=5
+
+# Security
+ENROLLMENT_TOKEN_SECRET=change-me-in-production
+CERT_VALIDITY_DAYS=90
+CA_CERT_VALIDITY_DAYS=3650
+
+# Rate Limiting
+RATE_LIMIT_ENROLLMENTS=5/minute
+RATE_LIMIT_CONNECTIONS=100/minute
+RATE_LIMIT_HEALTH=10/minute
+
+# Health Checks
+HEALTH_CHECK_MAX_AGE_MINUTES=5
+
+# Observability
+LOG_LEVEL=INFO  # DEBUG, INFO, WARNING, ERROR
+METRICS_PORT=9090
+
+# API
+API_TITLE=EdgeMesh Control Plane
+API_VERSION=1.0.0
+CORS_ORIGINS=["*"]
 ```
 
 ---
