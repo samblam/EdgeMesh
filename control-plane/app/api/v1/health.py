@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.health import HealthReportRequest, HealthReportResponse
 from app.models.healthcheck import HealthCheck
+from app.services.metrics import MetricsService
 from app.db.session import get_db
 
 router = APIRouter()
@@ -36,6 +37,9 @@ async def report_health(
 
     db.add(health_check)
     await db.commit()
+
+    # Record health check metric
+    MetricsService.record_health_check()
 
     return HealthReportResponse(
         message="Health report received",

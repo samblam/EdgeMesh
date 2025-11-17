@@ -121,14 +121,15 @@ async def request_connection(
     # Query OPA for authorization decision
     start_time = time.time()
     opa_client = OPAClient()
-    policy_result = await opa_client.evaluate_policy(input_data=opa_input)
+    policy_result = await opa_client.evaluate_policy(
+        policy_path="edgemesh/authz/allow",
+        input_data=opa_input
+    )
     latency = time.time() - start_time
 
-    # Extract decision (support both old and new format for backward compatibility)
-    # New format: {"allowed": True, "decision": "allow"}
-    # Old format: {"allow": True} (used by some test mocks)
-    allowed = policy_result.get("allowed", policy_result.get("allow", False))
-    decision = policy_result.get("decision", "allow" if allowed else "deny")
+    # Extract decision
+    decision = "allow" if policy_result.get("allow", False) else "deny"
+    allowed = decision == "allow"
 
     # Record authorization decision metrics
     MetricsService.record_authorization_decision(allowed=allowed, latency=latency)
