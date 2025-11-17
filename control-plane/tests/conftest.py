@@ -14,6 +14,8 @@ from app.db.session import get_db
 from app.models.device import Device  # noqa: F401
 from app.models.user import User  # noqa: F401
 from app.models.healthcheck import HealthCheck  # noqa: F401
+from app.models.connection import Connection  # noqa: F401
+from app.models.audit import AuditLog  # noqa: F401
 
 import tempfile
 import os
