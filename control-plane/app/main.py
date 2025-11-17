@@ -1,6 +1,6 @@
 """EdgeMesh Control Plane API"""
 from fastapi import FastAPI
-from app.api.v1 import enrollment, health
+from app.api.v1 import enrollment, health, connections
 from app.middleware.mtls import MTLSMiddleware
 
 app = FastAPI(
@@ -15,6 +15,7 @@ app.add_middleware(MTLSMiddleware)
 # Register API v1 routers
 app.include_router(enrollment.router, prefix="/api/v1", tags=["enrollment"])
 app.include_router(health.router, prefix="/api/v1", tags=["health"])
+app.include_router(connections.router, prefix="/api/v1", tags=["connections"])
 
 
 @app.get("/")

@@ -1,8 +1,8 @@
 """HealthCheck database model"""
-from sqlalchemy import String, Integer, JSON, func
+from sqlalchemy import String, Integer, JSON, Float, Boolean, func
 from sqlalchemy.orm import Mapped, mapped_column
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from app.db.base import Base
 
@@ -28,8 +28,18 @@ class HealthCheck(Base):
         String(50), nullable=False, server_default="healthy"
     )
 
-    # Metrics as JSON (CPU, memory, disk, etc.)
-    metrics: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+    # Resource usage metrics (for OPA policy evaluation)
+    cpu_usage: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    memory_usage: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    disk_usage: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Compliance fields (for OPA policy evaluation)
+    os_patches_current: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    antivirus_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    disk_encrypted: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
+    # Additional metrics as JSON (backward compatible, now optional)
+    metrics: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
     # Timestamp
     reported_at: Mapped[datetime] = mapped_column(
