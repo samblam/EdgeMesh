@@ -12,6 +12,7 @@ from app.db.session import get_db
 
 # Import all models to register them with Base.metadata
 from app.models.device import Device  # noqa: F401
+from app.models.user import User  # noqa: F401
 
 import tempfile
 import os
