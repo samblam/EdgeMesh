@@ -61,9 +61,9 @@ async def enroll_device(
         await db.commit()
         # Record successful enrollment
         MetricsService.record_device_enrollment()
-    except IntegrityError:
+    except IntegrityError as exc:
         await db.rollback()
-        raise HTTPException(status_code=409, detail="Device already enrolled")
+        raise HTTPException(status_code=409, detail="Device already enrolled") from exc
 
     # Return certificates
     return DeviceEnrollmentResponse(

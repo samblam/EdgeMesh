@@ -1,6 +1,5 @@
 """EdgeMesh Control Plane API"""
-from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Response
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from app.api.v1 import enrollment, health, connections
 from app.middleware.mtls import MTLSMiddleware
@@ -34,7 +33,7 @@ async def healthz():
     return {"status": "healthy"}
 
 
-@app.get("/metrics", response_class=PlainTextResponse)
+@app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint"""
-    return generate_latest()
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

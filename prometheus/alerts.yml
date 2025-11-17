@@ -9,6 +9,8 @@ groups:
             /
             rate(edgemesh_authorization_decisions_total[5m])
           ) > 0.10
+          and
+          rate(edgemesh_authorization_decisions_total[5m]) > 0
         for: 5m
         labels:
           severity: warning
@@ -23,6 +25,8 @@ groups:
             /
             sum(edgemesh_devices_total)
           ) > 0.20
+          and
+          sum(edgemesh_devices_total) > 0
         for: 10m
         labels:
           severity: warning

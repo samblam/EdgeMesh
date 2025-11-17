@@ -62,7 +62,7 @@
         "type": "gauge",
         "targets": [
           {
-            "expr": "rate(edgemesh_authorization_decisions_total{decision='allow'}[5m]) / rate(edgemesh_authorization_decisions_total[5m])",
+            "expr": "rate(edgemesh_authorization_decisions_total{decision='allow'}[5m]) / clamp_min(rate(edgemesh_authorization_decisions_total[5m]), 0.0001)",
             "refId": "A"
           }
         ],
