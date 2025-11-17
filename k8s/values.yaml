@@ -1,0 +1,218 @@
+# Helm Chart Values Reference
+# This file shows example values for deploying EdgeMesh with Helm
+# It references common Helm chart patterns and third-party charts
+
+# EdgeMesh Control Plane Configuration
+replicaCount: 3
+
+image:
+  repository: edgemesh/control-plane
+  tag: latest
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: api.edgemesh.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: edgemesh-tls
+      hosts:
+        - api.edgemesh.example.com
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "250m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Security Context
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# PostgreSQL Configuration (Bitnami PostgreSQL Chart)
+postgresql:
+  enabled: true
+  auth:
+    database: edgemesh
+    username: postgres
+    existingSecret: edgemesh-secrets
+    secretKeys:
+      adminPasswordKey: postgres-password
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""  # Use default storage class
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "2Gi"
+        cpu: "1000m"
+  readReplicas:
+    enabled: false
+    replicaCount: 1
+
+# Open Policy Agent Configuration
+opa:
+  enabled: true
+  image:
+    repository: openpolicyagent/opa
+    tag: latest-rootless
+  replicaCount: 2
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+# Monitoring Configuration
+monitoring:
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+    retention: 30d
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "2Gi"
+        cpu: "1000m"
+
+  grafana:
+    enabled: true
+    adminPassword: changeme  # Override with secrets
+    persistence:
+      enabled: true
+      size: 10Gi
+    datasources:
+      datasources.yaml:
+        apiVersion: 1
+        datasources:
+        - name: Prometheus
+          type: prometheus
+          url: http://prometheus:9090
+          isDefault: true
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "200m"
+
+# Environment Variables
+env:
+  - name: LOG_LEVEL
+    value: "INFO"
+  - name: OPA_URL
+    value: "http://opa:8181"
+  - name: DATABASE_URL
+    valueFrom:
+      secretKeyRef:
+        name: edgemesh-secrets
+        key: database-url
+  - name: ENROLLMENT_TOKEN_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: edgemesh-secrets
+        key: enrollment-token-secret
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# Network Policy
+networkPolicy:
+  enabled: true
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            name: ingress-nginx
+      ports:
+      - protocol: TCP
+        port: 8000
+  egress:
+    - to:
+      - namespaceSelector: {}
+      ports:
+      - protocol: TCP
+        port: 5432  # PostgreSQL
+      - protocol: TCP
+        port: 8181  # OPA
+      - protocol: TCP
+        port: 53    # DNS
+        protocol: UDP
+
+# Service Account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: edgemesh
+
+# RBAC
+rbac:
+  create: true
+
+# Pod Annotations for Prometheus
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8000"
+  prometheus.io/path: "/metrics"
+
+# Node Selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity - Pod Anti-Affinity for HA
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app
+            operator: In
+            values:
+            - edgemesh-api
+        topologyKey: kubernetes.io/hostname

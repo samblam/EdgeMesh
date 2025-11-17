@@ -1,0 +1,140 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opa-policy
+  namespace: edgemesh
+data:
+  device_access.rego: |
+    package edgemesh.authz
+
+    import future.keywords.if
+    import future.keywords.in
+
+    # Default deny
+    default allow := false
+
+    # Allow if all conditions met
+    allow if {
+        device_is_healthy(input.device)
+        service_access_allowed(input.user, input.service)
+        time_restrictions_met(input.user, input.time)
+    }
+
+    # Device health check
+    device_is_healthy(device) if {
+        device.authenticated == true
+        device.status == "active"
+        device.os_patches_current == true
+        device.antivirus_enabled == true
+        device.disk_encrypted == true
+        device.cpu_usage < 90
+        device.memory_usage < 90
+    }
+
+    # Service access control by role
+    service_access_allowed(user, service) if {
+        user.role == "admin"
+    }
+
+    service_access_allowed(user, service) if {
+        user.role == "developer"
+        service.name in ["database", "api", "cache"]
+    }
+
+    service_access_allowed(user, service) if {
+        user.role == "analyst"
+        service.name in ["database", "analytics"]
+    }
+
+    # Time-based restrictions (business hours for non-admin)
+    time_restrictions_met(user, time) if {
+        user.role == "admin"
+    }
+
+    time_restrictions_met(user, time) if {
+        user.role != "admin"
+        time.day_of_week >= 1
+        time.day_of_week <= 5
+        time.hour >= 9
+        time.hour < 17
+    }
+  compliance.rego: |
+    package edgemesh.compliance
+
+    import future.keywords.if
+
+    # Device compliance check
+    device_compliant(device) if {
+        device.os_patches_current == true
+        device.antivirus_enabled == true
+        device.disk_encrypted == true
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opa
+  namespace: edgemesh
+  labels:
+    app: opa
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: opa
+  template:
+    metadata:
+      labels:
+        app: opa
+    spec:
+      containers:
+      - name: opa
+        image: openpolicyagent/opa:latest-rootless
+        args:
+        - "run"
+        - "--server"
+        - "--log-level=info"
+        - "/policies"
+        ports:
+        - containerPort: 8181
+          name: http
+        volumeMounts:
+        - name: opa-policy
+          mountPath: /policies
+          readOnly: true
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8181
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8181
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: opa-policy
+        configMap:
+          name: opa-policy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opa
+  namespace: edgemesh
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8181
+    targetPort: 8181
+  selector:
+    app: opa
