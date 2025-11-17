@@ -27,7 +27,7 @@ device_is_healthy(device) if {
 # Service access control based on roles
 service_access_allowed(user, service) if {
     role := user.role
-    service_permissions[service][role] == true
+    service_permissions[service.name][role] == true
 }
 
 # Service to role mapping

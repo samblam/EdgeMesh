@@ -1,7 +1,6 @@
 """Connection-related Pydantic schemas"""
 from pydantic import BaseModel, Field
 from typing import Any, Dict
-from datetime import datetime
 
 
 class ConnectionRequest(BaseModel):

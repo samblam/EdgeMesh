@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Dict, Any
+from typing import Optional, Dict, Any
 import uuid
 
 from app.schemas.connection import ConnectionRequest, ConnectionResponse

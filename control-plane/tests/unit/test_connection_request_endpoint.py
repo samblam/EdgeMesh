@@ -1,7 +1,7 @@
 """Tests for connection request endpoint with OPA integration"""
 import pytest
 from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 from httpx import AsyncClient
 
 
