@@ -1,8 +1,9 @@
 """Connection request and management endpoints"""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from datetime import datetime, timezone, timedelta
+from typing import List, Optional, Dict, Any
 import uuid
 
 from app.schemas.connection import ConnectionRequest, ConnectionResponse
@@ -170,3 +171,139 @@ async def request_connection(
             "allowed_ips": ["10.0.0.0/8"]
         }
     )
+
+@router.get("/connections/{connection_id}")
+async def get_connection(
+    connection_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    Get connection details
+
+    Retrieves information about a specific connection.
+
+    Args:
+        connection_id: Connection identifier
+        db: Database session
+
+    Returns:
+        Connection details
+
+    Raises:
+        HTTPException 404: Connection not found
+    """
+    result = await db.execute(
+        select(Connection).where(Connection.connection_id == connection_id)
+    )
+    connection = result.scalar_one_or_none()
+
+    if not connection:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    return {
+        "connection_id": connection.connection_id,
+        "device_id": connection.device_id,
+        "user_id": connection.user_id,
+        "service_name": connection.service_name,
+        "status": connection.status,
+        "established_at": connection.established_at.isoformat(),
+        "terminated_at": connection.terminated_at.isoformat() if connection.terminated_at else None
+    }
+
+
+@router.delete("/connections/{connection_id}")
+async def terminate_connection(
+    connection_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, str]:
+    """
+    Terminate a connection
+
+    Marks a connection as terminated and records the termination time.
+
+    Args:
+        connection_id: Connection identifier
+        db: Database session
+
+    Returns:
+        Termination confirmation
+
+    Raises:
+        HTTPException 404: Connection not found
+        HTTPException 400: Connection already terminated
+    """
+    result = await db.execute(
+        select(Connection).where(Connection.connection_id == connection_id)
+    )
+    connection = result.scalar_one_or_none()
+
+    if not connection:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    if connection.status == "terminated":
+        raise HTTPException(
+            status_code=400,
+            detail="Connection already terminated"
+        )
+
+    # Update connection status
+    connection.status = "terminated"
+    connection.terminated_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    return {
+        "message": "Connection terminated",
+        "connection_id": connection_id
+    }
+
+
+@router.get("/connections")
+async def list_connections(
+    device_id: Optional[str] = Query(None, description="Filter by device ID"),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    List connections
+
+    Retrieves a list of connections, optionally filtered by device, user, or status.
+
+    Args:
+        device_id: Optional device ID filter
+        user_id: Optional user ID filter
+        status: Optional status filter
+        db: Database session
+
+    Returns:
+        List of connections
+    """
+    query = select(Connection)
+
+    if device_id:
+        query = query.where(Connection.device_id == device_id)
+    if user_id:
+        query = query.where(Connection.user_id == user_id)
+    if status:
+        query = query.where(Connection.status == status)
+
+    query = query.order_by(desc(Connection.established_at))
+
+    result = await db.execute(query)
+    connections = result.scalars().all()
+
+    return {
+        "connections": [
+            {
+                "connection_id": conn.connection_id,
+                "device_id": conn.device_id,
+                "user_id": conn.user_id,
+                "service_name": conn.service_name,
+                "status": conn.status,
+                "established_at": conn.established_at.isoformat(),
+                "terminated_at": conn.terminated_at.isoformat() if conn.terminated_at else None
+            }
+            for conn in connections
+        ],
+        "total": len(connections)
+    }
