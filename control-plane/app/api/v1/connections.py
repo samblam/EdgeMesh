@@ -5,6 +5,7 @@ from sqlalchemy import select, desc
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 import uuid
+import time
 
 from app.schemas.connection import ConnectionRequest, ConnectionResponse
 from app.models.device import Device
@@ -13,6 +14,7 @@ from app.models.healthcheck import HealthCheck
 from app.models.connection import Connection
 from app.models.audit import AuditLog
 from app.services.opa_client import OPAClient
+from app.services.metrics import MetricsService
 from app.db.session import get_db
 
 router = APIRouter()
@@ -117,14 +119,19 @@ async def request_connection(
     }
 
     # Query OPA for authorization decision
+    start_time = time.time()
     opa_client = OPAClient()
-    policy_result = await opa_client.evaluate_policy(
-        policy_path="edgemesh/authz/allow",
-        input_data=opa_input
-    )
+    policy_result = await opa_client.evaluate_policy(input_data=opa_input)
+    latency = time.time() - start_time
 
-    # Extract decision
-    decision = "allow" if policy_result.get("allow", False) else "deny"
+    # Extract decision (support both old and new format for backward compatibility)
+    # New format: {"allowed": True, "decision": "allow"}
+    # Old format: {"allow": True} (used by some test mocks)
+    allowed = policy_result.get("allowed", policy_result.get("allow", False))
+    decision = policy_result.get("decision", "allow" if allowed else "deny")
+
+    # Record authorization decision metrics
+    MetricsService.record_authorization_decision(allowed=allowed, latency=latency)
 
     # Log decision to audit log
     audit = AuditLog(
@@ -142,6 +149,8 @@ async def request_connection(
 
     # If denied, return 403
     if decision == "deny":
+        # Record denied connection request
+        MetricsService.record_connection_request(service=request.service_name, authorized=False)
         raise HTTPException(
             status_code=403,
             detail="Access denied by policy"
@@ -158,6 +167,9 @@ async def request_connection(
     )
     db.add(connection)
     await db.commit()
+
+    # Record authorized connection request
+    MetricsService.record_connection_request(service=request.service_name, authorized=True)
 
     # Return success response with virtual tunnel details
     return ConnectionResponse(
@@ -250,6 +262,9 @@ async def terminate_connection(
     connection.status = "terminated"
     connection.terminated_at = datetime.now(timezone.utc)
     await db.commit()
+
+    # Record connection termination
+    MetricsService.record_connection_terminated(service=connection.service_name)
 
     return {
         "message": "Connection terminated",
